@@ -111,7 +111,27 @@ jobs:
           chmod +x scripts/fetch-llama.sh
           ./scripts/fetch-llama.sh
 
-      - name: Build release APK
+      - name: Generate signing key
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$RUNNER_TEMP/signing"
+
+          keytool -genkeypair \
+            -v \
+            -keystore "$RUNNER_TEMP/signing/release.keystore" \
+            -alias aichat \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storepass android \
+            -keypass android \
+            -dname "CN=AI Chat, OU=Android, O=AI Chat, L=Unknown, ST=Unknown, C=BR"
+
+          echo "KEYSTORE=$RUNNER_TEMP/signing/release.keystore" >> "$GITHUB_ENV"
+
+      - name: Build unsigned release APK
         working-directory: ${{ steps.project.outputs.path }}
         shell: bash
         env:
@@ -126,15 +146,42 @@ jobs:
             --no-daemon \
             --stacktrace
 
+      - name: Sign release APK
+        id: sign
+        working-directory: ${{ steps.project.outputs.path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="$(find app/build/outputs/apk/release -type f -name '*.apk' -print -quit)"
+          test -n "$APK"
+
+          APKSIGNER="${{ steps.android.outputs.sdk }}/build-tools/35.0.0/apksigner"
+          test -x "$APKSIGNER"
+
+          mkdir -p app/build/outputs/apk/installed
+
+          "$APKSIGNER" sign \
+            --ks "$KEYSTORE" \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            --ks-key-alias aichat \
+            --out app/build/outputs/apk/installed/ai-chat-release.apk \
+            "$APK"
+
+          "$APKSIGNER" verify --verbose app/build/outputs/apk/installed/ai-chat-release.apk
+
+          echo "apk=app/build/outputs/apk/installed/ai-chat-release.apk" >> "$GITHUB_OUTPUT"
+
       - name: Show generated APK
         working-directory: ${{ steps.project.outputs.path }}
         run: |
-          find app/build/outputs -type f -name '*.apk' -print
+          ls -lh app/build/outputs/apk/installed/ai-chat-release.apk
 
-      - name: Upload APK
+      - name: Upload installable APK
         uses: actions/upload-artifact@v4
         with:
-          name: ai-chat-release-v3
-          path: ${{ steps.project.outputs.path }}/app/build/outputs/apk/release/*.apk
+          name: ai-chat-release-signed
+          path: ${{ steps.project.outputs.path }}/app/build/outputs/apk/installed/ai-chat-release.apk
           if-no-files-found: error
 
