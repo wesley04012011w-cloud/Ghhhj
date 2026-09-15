@@ -16,7 +16,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Find project ZIP
+      - name: Find ZIP
         id: zip
         shell: bash
         run: |
@@ -25,11 +25,11 @@ jobs:
           ZIP="$(find . -maxdepth 1 -type f -name '*.zip' | head -n 1)"
 
           if [ -z "$ZIP" ]; then
-            echo "Nenhum ZIP encontrado na raiz do repositório."
+            echo "ERRO: nenhum ZIP encontrado."
             exit 1
           fi
 
-          echo "ZIP encontrado: $ZIP"
+          echo "ZIP: $ZIP"
           echo "file=$ZIP" >> "$GITHUB_OUTPUT"
 
       - name: Extract project
@@ -38,64 +38,52 @@ jobs:
           mkdir project
           unzip -q "${{ steps.zip.outputs.file }}" -d project
 
-      - name: Find Android project
+      - name: Find project root
         id: project
         shell: bash
         run: |
           set -e
 
-          ROOT=""
-
-          if [ -f "project/settings.gradle.kts" ]; then
+          if [ -f project/settings.gradle.kts ]; then
             ROOT="project"
           else
             ROOT="$(find project \
               -type f \
-              -name 'settings.gradle.kts' \
+              -name settings.gradle.kts \
               -printf '%h\n' | head -n 1)"
           fi
 
           if [ -z "$ROOT" ]; then
-            echo "settings.gradle.kts não encontrado."
-            find project -maxdepth 3 -type f
+            echo "ERRO: projeto Android não encontrado."
             exit 1
           fi
 
-          echo "Projeto encontrado em: $ROOT"
+          echo "Projeto: $ROOT"
           echo "path=$ROOT" >> "$GITHUB_OUTPUT"
 
-      - name: Setup Java
+      - name: Show Android environment
+        shell: bash
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+
+          echo ""
+          echo "SDK:"
+          ls -la "$ANDROID_HOME" || true
+
+          echo ""
+          echo "NDK:"
+          ls -la "$ANDROID_HOME/ndk" || true
+
+          echo ""
+          echo "CMake:"
+          ls -la "$ANDROID_HOME/cmake" || true
+
+      - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android components
-        shell: bash
-        run: |
-          set -e
-
-          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-
-          if [ ! -f "$SDKMANAGER" ]; then
-            SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" \
-              -name sdkmanager \
-              -type f | head -n 1)"
-          fi
-
-          echo "Usando sdkmanager: $SDKMANAGER"
-
-          yes | "$SDKMANAGER" --licenses >/dev/null || true
-
-          "$SDKMANAGER" \
-            "platform-tools" \
-            "platforms;android-35" \
-            "build-tools;35.0.0" \
-            "ndk;27.2.12479018" \
-            "cmake;3.28.1"
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -112,12 +100,15 @@ jobs:
       - name: Build APK
         working-directory: ${{ steps.project.outputs.path }}
         shell: bash
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
         run: |
           gradle :app:assembleRelease \
             --no-daemon \
             --stacktrace
+
+      - name: Find APK
+        working-directory: ${{ steps.project.outputs.path }}
+        run: |
+          find app/build/outputs -type f -name "*.apk" -print
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
