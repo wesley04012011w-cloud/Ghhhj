@@ -1,4 +1,5 @@
-name: Build Android project from ZIP
+
+name: Build Android from ZIP
 
 on:
   workflow_dispatch:
@@ -12,44 +13,58 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Find project ZIP
         id: zip
         shell: bash
         run: |
-          set -euo pipefail
-          mapfile -t zips < <(find . -maxdepth 1 -type f -name '*.zip' -print)
-          if [ "${#zips[@]}" -ne 1 ]; then
-            echo "Expected exactly one project ZIP in the repository root."
-            printf '%s\n' "${zips[@]}"
+          set -e
+
+          ZIP="$(find . -maxdepth 1 -type f -name '*.zip' | head -n 1)"
+
+          if [ -z "$ZIP" ]; then
+            echo "Nenhum ZIP encontrado na raiz do repositório."
             exit 1
           fi
-          echo "zip=${zips[0]}" >> "$GITHUB_OUTPUT"
+
+          echo "ZIP encontrado: $ZIP"
+          echo "file=$ZIP" >> "$GITHUB_OUTPUT"
 
       - name: Extract project
         run: |
           rm -rf project
           mkdir project
-          unzip -q "${{ steps.zip.outputs.zip }}" -d project
+          unzip -q "${{ steps.zip.outputs.file }}" -d project
 
-      - name: Detect project root
-        id: root
+      - name: Find Android project
+        id: project
         shell: bash
         run: |
-          set -euo pipefail
-          if [ -f project/settings.gradle.kts ]; then
-            ROOT=project
-          else
-            ROOT="$(find project -mindepth 1 -maxdepth 2 -type f -name settings.gradle.kts -printf '%h\n' | head -n1)"
-          fi
-          test -n "$ROOT"
-          test -f "$ROOT/settings.gradle.kts"
-          echo "path=$ROOT" >> "$GITHUB_OUTPUT"
-          echo "Project root: $ROOT"
+          set -e
 
-      - name: Setup Java 17
+          ROOT=""
+
+          if [ -f "project/settings.gradle.kts" ]; then
+            ROOT="project"
+          else
+            ROOT="$(find project \
+              -type f \
+              -name 'settings.gradle.kts' \
+              -printf '%h\n' | head -n 1)"
+          fi
+
+          if [ -z "$ROOT" ]; then
+            echo "settings.gradle.kts não encontrado."
+            find project -maxdepth 3 -type f
+            exit 1
+          fi
+
+          echo "Projeto encontrado em: $ROOT"
+          echo "path=$ROOT" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -58,38 +73,55 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK, NDK and CMake
+      - name: Install Android components
+        shell: bash
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager \
+          set -e
+
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+
+          if [ ! -f "$SDKMANAGER" ]; then
+            SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" \
+              -name sdkmanager \
+              -type f | head -n 1)"
+          fi
+
+          echo "Usando sdkmanager: $SDKMANAGER"
+
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+
+          "$SDKMANAGER" \
             "platform-tools" \
             "platforms;android-35" \
             "build-tools;35.0.0" \
             "ndk;27.2.12479018" \
             "cmake;3.28.1"
 
-      - name: Install Gradle 8.9
+      - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
 
-      - name: Fetch llama.cpp
-        working-directory: ${{ steps.root.outputs.path }}
+      - name: Download llama.cpp
+        working-directory: ${{ steps.project.outputs.path }}
+        shell: bash
         run: |
           chmod +x scripts/fetch-llama.sh
           ./scripts/fetch-llama.sh
 
-      - name: Build release APK
-        working-directory: ${{ steps.root.outputs.path }}
+      - name: Build APK
+        working-directory: ${{ steps.project.outputs.path }}
+        shell: bash
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
         run: |
-          gradle :app:assembleRelease --no-daemon --stacktrace
+          gradle :app:assembleRelease \
+            --no-daemon \
+            --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: ai-chat-release
-          path: ${{ steps.root.outputs.path }}/app/build/outputs/apk/release/*.apk
+          path: ${{ steps.project.outputs.path }}/app/build/outputs/apk/release/*.apk
           if-no-files-found: error
-
