@@ -66,10 +66,8 @@ jobs:
           set -euo pipefail
           SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
           test -n "$SDK_ROOT"
-
           SDKMANAGER="$(find "$SDK_ROOT" -type f -name sdkmanager 2>/dev/null | head -n 1)"
           test -n "$SDKMANAGER"
-
           echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
           echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
           echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
@@ -93,6 +91,12 @@ jobs:
       - name: Install npm dependencies
         working-directory: project
         run: npm install --no-audit --no-fund
+
+      - name: Verify JS dependency versions
+        working-directory: project
+        run: |
+          node -e "const p=require('./package.json'); console.log('React:',p.dependencies.react); console.log('React Native:',p.dependencies['react-native']); console.log('React renderer:',p.devDependencies['react-test-renderer'])"
+          node -e "const p=require('./package.json'); if(p.dependencies.react!=='19.2.3') process.exit(1)"
 
       - name: Fetch llama.cpp
         working-directory: project
