@@ -1,187 +1,79 @@
-name: Build Android from ZIP
+name: Build Android APK - React Native
 
 on:
   workflow_dispatch:
   push:
-    paths:
-      - "*.zip"
-      - ".github/workflows/build-from-zip.yml"
+    branches: [ main ]
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
 
     steps:
-      - name: Checkout repository
+      - name: Checkout workflow repo
         uses: actions/checkout@v4
 
-      - name: Find project ZIP
-        id: zip
-        shell: bash
+      - name: Download React Native project ZIP
+        env:
+          PROJECT_ZIP_URL: ${{ secrets.PROJECT_ZIP_URL }}
         run: |
-          set -euo pipefail
-
-          mapfile -t zips < <(
-            find . -maxdepth 1 -type f -name '*.zip' -print
-          )
-
-          if [ "${#zips[@]}" -ne 1 ]; then
-            echo "Expected exactly one ZIP in repository root."
-            printf '%s\n' "${zips[@]}"
+          set -e
+          if [ -z "$PROJECT_ZIP_URL" ]; then
+            echo "PROJECT_ZIP_URL secret is required."
             exit 1
           fi
-
-          echo "file=${zips[0]}" >> "$GITHUB_OUTPUT"
+          curl -L --fail --retry 3 "$PROJECT_ZIP_URL" -o project.zip
 
       - name: Extract project
         run: |
-          set -euo pipefail
+          set -e
           rm -rf project
           mkdir project
-          unzip -q "${{ steps.zip.outputs.file }}" -d project
+          unzip -q project.zip -d project
 
-      - name: Locate Android project
-        id: project
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [ -f project/settings.gradle.kts ]; then
-            root="project"
-          else
-            root="$(find project -type f -name settings.gradle.kts -printf '%h\n' | head -n 1)"
+          if [ ! -f project/package.json ]; then
+            ROOT="$(find project -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+            if [ -n "$ROOT" ] && [ -f "$ROOT/package.json" ]; then
+              shopt -s dotglob
+              mv "$ROOT"/* project/
+              rmdir "$ROOT"
+            fi
           fi
 
-          test -n "$root"
-          test -f "$root/settings.gradle.kts"
+          test -f project/package.json
+          test -f project/android/gradlew
+          chmod +x project/android/gradlew
 
-          echo "path=$root" >> "$GITHUB_OUTPUT"
-          echo "Android project: $root"
-
-      - name: Setup Java 17
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: '17'
+          cache: gradle
 
-      - name: Locate Android SDK tools
-        id: android
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
-          test -n "$SDK"
-
-          SDKMANAGER="$(find "$SDK/cmdline-tools" -type f -name sdkmanager -print -quit)"
-          test -n "$SDKMANAGER"
-
-          echo "sdk=$SDK" >> "$GITHUB_OUTPUT"
-          echo "sdkmanager=$SDKMANAGER" >> "$GITHUB_OUTPUT"
-
-          echo "Android SDK: $SDK"
-          echo "sdkmanager: $SDKMANAGER"
-
-      - name: Install Android SDK packages
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          SDKMANAGER="${{ steps.android.outputs.sdkmanager }}"
-
-          yes | "$SDKMANAGER" --licenses >/dev/null || true
-
-          "$SDKMANAGER" \
-            "platform-tools" \
-            "platforms;android-36" \
-            "build-tools;35.0.0" \
-            "ndk;29.0.13113456" \
-            "cmake;3.31.6"
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+      - name: Set up Node 22.13.1
+        uses: actions/setup-node@v4
         with:
-          gradle-version: "8.9"
+          node-version: '22.13.1'
+          cache: npm
+          cache-dependency-path: project/package-lock.json
 
-      - name: Download llama.cpp
-        working-directory: ${{ steps.project.outputs.path }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          chmod +x scripts/fetch-llama.sh
-          ./scripts/fetch-llama.sh
+      - name: Install npm dependencies
+        working-directory: project
+        run: npm ci
 
-      - name: Generate signing key
-        shell: bash
-        run: |
-          set -euo pipefail
+      - name: Verify React Native environment
+        working-directory: project
+        run: npx react-native --version
 
-          mkdir -p "$RUNNER_TEMP/signing"
+      - name: Build release APK
+        working-directory: project/android
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
 
-          keytool -genkeypair \
-            -v \
-            -keystore "$RUNNER_TEMP/signing/release.keystore" \
-            -alias aichat \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10000 \
-            -storepass android \
-            -keypass android \
-            -dname "CN=AI Chat, OU=Android, O=AI Chat, L=Unknown, ST=Unknown, C=BR"
-
-          echo "KEYSTORE=$RUNNER_TEMP/signing/release.keystore" >> "$GITHUB_ENV"
-
-      - name: Build unsigned release APK
-        working-directory: ${{ steps.project.outputs.path }}
-        shell: bash
-        env:
-          ANDROID_NDK_HOME: ${{ steps.android.outputs.sdk }}/ndk/29.0.13113456
-          ANDROID_NDK_ROOT: ${{ steps.android.outputs.sdk }}/ndk/29.0.13113456
-        run: |
-          set -euo pipefail
-
-          export PATH="${{ steps.android.outputs.sdk }}/cmake/3.31.6/bin:$PATH"
-
-          gradle :app:assembleRelease \
-            --no-daemon \
-            --stacktrace
-
-      - name: Sign release APK
-        id: sign
-        working-directory: ${{ steps.project.outputs.path }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APK="$(find app/build/outputs/apk/release -type f -name '*.apk' -print -quit)"
-          test -n "$APK"
-
-          APKSIGNER="${{ steps.android.outputs.sdk }}/build-tools/35.0.0/apksigner"
-          test -x "$APKSIGNER"
-
-          mkdir -p app/build/outputs/apk/installed
-
-          "$APKSIGNER" sign \
-            --ks "$KEYSTORE" \
-            --ks-pass pass:android \
-            --key-pass pass:android \
-            --ks-key-alias aichat \
-            --out app/build/outputs/apk/installed/ai-chat-release.apk \
-            "$APK"
-
-          "$APKSIGNER" verify --verbose app/build/outputs/apk/installed/ai-chat-release.apk
-
-          echo "apk=app/build/outputs/apk/installed/ai-chat-release.apk" >> "$GITHUB_OUTPUT"
-
-      - name: Show generated APK
-        working-directory: ${{ steps.project.outputs.path }}
-        run: |
-          ls -lh app/build/outputs/apk/installed/ai-chat-release.apk
-
-      - name: Upload installable APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: ai-chat-release-signed
-          path: ${{ steps.project.outputs.path }}/app/build/outputs/apk/installed/ai-chat-release.apk
+          name: ai-chat-react-native-release
+          path: project/android/app/build/outputs/apk/release/*.apk
           if-no-files-found: error
 
