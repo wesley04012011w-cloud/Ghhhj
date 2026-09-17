@@ -10,27 +10,31 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Checkout workflow repo
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download React Native project ZIP
-        env:
-          PROJECT_ZIP_URL: ${{ secrets.PROJECT_ZIP_URL }}
+      - name: Find project ZIP
+        id: zip
+        shell: bash
         run: |
           set -e
-          if [ -z "$PROJECT_ZIP_URL" ]; then
-            echo "PROJECT_ZIP_URL secret is required."
+          ZIP="$(find . -maxdepth 2 -type f -iname '*.zip' | head -n 1)"
+          if [ -z "$ZIP" ]; then
+            echo "No project ZIP found in the repository."
             exit 1
           fi
-          curl -L --fail --retry 3 "$PROJECT_ZIP_URL" -o project.zip
+          echo "Using: $ZIP"
+          echo "path=$ZIP" >> "$GITHUB_OUTPUT"
 
-      - name: Extract project
+      - name: Extract React Native project
+        shell: bash
         run: |
           set -e
           rm -rf project
           mkdir project
-          unzip -q project.zip -d project
+          unzip -q "${{ steps.zip.outputs.path }}" -d project
 
+          # Support ZIPs with a single top-level project directory.
           if [ ! -f project/package.json ]; then
             ROOT="$(find project -mindepth 1 -maxdepth 1 -type d | head -n 1)"
             if [ -n "$ROOT" ] && [ -f "$ROOT/package.json" ]; then
@@ -50,6 +54,7 @@ jobs:
           distribution: temurin
           java-version: '17'
           cache: gradle
+          cache-dependency-path: project/android/**/*.gradle*
 
       - name: Set up Node 22.13.1
         uses: actions/setup-node@v4
@@ -62,7 +67,7 @@ jobs:
         working-directory: project
         run: npm ci
 
-      - name: Verify React Native environment
+      - name: Check React Native version
         working-directory: project
         run: npx react-native --version
 
@@ -76,4 +81,3 @@ jobs:
           name: ai-chat-react-native-release
           path: project/android/app/build/outputs/apk/release/*.apk
           if-no-files-found: error
-
