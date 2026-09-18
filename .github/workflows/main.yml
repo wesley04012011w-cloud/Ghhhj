@@ -1,364 +1,91 @@
-name: Build LocalPal Android
+name: Build Android from ZIP
 
 on:
   workflow_dispatch:
-
   push:
     paths:
-      - "*.zip"
-      - ".github/workflows/build.yml"
-
-permissions:
-  contents: read
+      - 'pocketpal-local-llm.zip'
+      - '.github/workflows/build-android-from-zip.yml'
 
 env:
-  NODE_VERSION: "22"
-  JAVA_VERSION: "17"
-  GRADLE_VERSION: "8.10"
-  NDK_VERSION: "28.1.13356709"
+  LLAMA_CPP_REF: master
+  NDK_VERSION: '28.1.13356709'
+  NODE_VERSION: '22'
 
 jobs:
   build:
-    name: Build APK
     runs-on: ubuntu-latest
 
     steps:
-
-      # ---------------------------------------------------------
-      # 1. Baixar o repositório
-      # ---------------------------------------------------------
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-
-      # ---------------------------------------------------------
-      # 2. Localizar o ZIP do projeto
-      # ---------------------------------------------------------
-      - name: Localizar projeto ZIP
-        id: find_zip
-        shell: bash
+      - name: Extract project ZIP
         run: |
-          set -e
+          rm -rf workspace
+          mkdir workspace
+          unzip -q pocketpal-local-llm.zip -d workspace
+          test -f workspace/package.json
+          test -d workspace/android
 
-          ZIP_FILE=$(find . -maxdepth 1 -type f \
-            \( -name "*.zip" -o -name "*.ZIP" \) \
-            | head -n 1)
-
-          if [ -z "$ZIP_FILE" ]; then
-            echo "ERRO: nenhum arquivo .zip encontrado na raiz."
-            exit 1
-          fi
-
-          echo "Projeto encontrado:"
-          echo "$ZIP_FILE"
-
-          echo "zip=$ZIP_FILE" >> "$GITHUB_OUTPUT"
-
-
-      # ---------------------------------------------------------
-      # 3. Extrair projeto
-      # ---------------------------------------------------------
-      - name: Extrair projeto
-        shell: bash
-        run: |
-          set -e
-
-          rm -rf project
-          mkdir -p project
-
-          unzip -q "${{ steps.find_zip.outputs.zip }}" -d project
-
-          echo "Conteúdo inicial:"
-          find project -maxdepth 3 -type f | head -100
-
-
-      # ---------------------------------------------------------
-      # 4. Detectar se o ZIP possui uma pasta raiz
-      # ---------------------------------------------------------
-      - name: Normalizar estrutura do projeto
-        shell: bash
-        run: |
-          set -e
-
-          # Caso o ZIP seja:
-          #
-          # projeto.zip
-          # └── pocketpal-local-llm/
-          #     ├── package.json
-          #     └── android/
-          #
-          # movemos essa pasta para a raiz de build.
-          
-          if [ ! -f "project/package.json" ]; then
-
-            PACKAGE_JSON=$(find project \
-              -mindepth 2 \
-              -maxdepth 4 \
-              -name package.json \
-              -type f \
-              | head -n 1)
-
-            if [ -z "$PACKAGE_JSON" ]; then
-              echo "ERRO: package.json não encontrado dentro do ZIP."
-              exit 1
-            fi
-
-            PROJECT_ROOT=$(dirname "$PACKAGE_JSON")
-
-            echo "Raiz detectada:"
-            echo "$PROJECT_ROOT"
-
-            rm -rf build-project
-            mkdir -p build-project
-
-            cp -a "$PROJECT_ROOT"/. build-project/
-
-            rm -rf project
-            mv build-project project
-          fi
-
-          echo ""
-          echo "Estrutura final:"
-          find project -maxdepth 2 -type f | sort | head -100
-
-
-      # ---------------------------------------------------------
-      # 5. Java
-      # ---------------------------------------------------------
-      - name: Configurar Java
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: ${{ env.JAVA_VERSION }}
+          java-version: '17'
 
-
-      # ---------------------------------------------------------
-      # 6. Node.js
-      # ---------------------------------------------------------
-      - name: Configurar Node.js
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: workspace/package-lock.json
 
-
-      # ---------------------------------------------------------
-      # 7. Android SDK
-      # ---------------------------------------------------------
-      - name: Configurar Android SDK
+      - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
+      - name: Install Android NDK
+        run: sdkmanager "ndk;${NDK_VERSION}"
 
-      # ---------------------------------------------------------
-      # 8. Android NDK
-      # ---------------------------------------------------------
-      - name: Instalar Android NDK
-        shell: bash
+      - name: Install npm dependencies
+        working-directory: workspace
+        run: npm install
+
+      - name: Fetch llama.cpp
+        working-directory: workspace
         run: |
-          set -e
+          mkdir -p third_party
+          git clone https://github.com/ggml-org/llama.cpp.git third_party/llama.cpp
+          cd third_party/llama.cpp
+          git checkout "${LLAMA_CPP_REF}"
 
-          sdkmanager \
-            "platform-tools" \
-            "platforms;android-35" \
-            "build-tools;35.0.0" \
-            "ndk;${NDK_VERSION}"
+      - name: Build web
+        working-directory: workspace
+        run: npm run build:web
 
-          echo ""
-          echo "NDK instalado:"
-          ls "$ANDROID_SDK_ROOT/ndk/"
+      - name: Copy web assets
+        working-directory: workspace
+        run: |
+          rm -rf android/app/src/main/assets/public
+          mkdir -p android/app/src/main/assets/public
+          cp -R dist/. android/app/src/main/assets/public/
 
-
-      # ---------------------------------------------------------
-      # 9. Instalar Gradle
-      # ---------------------------------------------------------
-      - name: Configurar Gradle
+      - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: ${{ env.GRADLE_VERSION }}
+          gradle-version: '8.10'
 
-
-      # ---------------------------------------------------------
-      # 10. Instalar dependências JS
-      # ---------------------------------------------------------
-      - name: Instalar dependências
-        working-directory: project
-        shell: bash
-        run: |
-          set -e
-
-          if [ -f package-lock.json ]; then
-            npm ci
-          else
-            npm install
-          fi
-
-
-      # ---------------------------------------------------------
-      # 11. Baixar llama.cpp
-      # ---------------------------------------------------------
-      - name: Baixar llama.cpp
-        working-directory: project
-        shell: bash
-        run: |
-          set -e
-
-          mkdir -p third_party
-
-          rm -rf third_party/llama.cpp
-
-          git clone \
-            --depth 1 \
-            https://github.com/ggml-org/llama.cpp.git \
-            third_party/llama.cpp
-
-          echo "llama.cpp:"
-          git -C third_party/llama.cpp rev-parse HEAD
-
-
-      # ---------------------------------------------------------
-      # 12. Build do React
-      # ---------------------------------------------------------
-      - name: Build frontend
-        working-directory: project
-        shell: bash
-        run: |
-          set -e
-
-          npm run build:web
-
-          if [ ! -d dist ]; then
-            echo "ERRO: diretório dist não foi criado."
-            exit 1
-          fi
-
-
-      # ---------------------------------------------------------
-      # 13. Preparar assets do Capacitor
-      # ---------------------------------------------------------
-      - name: Preparar Capacitor
-        working-directory: project
-        shell: bash
-        run: |
-          set -e
-
-          mkdir -p android/app/src/main/assets/public
-
-          rm -rf android/app/src/main/assets/public/*
-
-          cp -a dist/. \
-            android/app/src/main/assets/public/
-
-
-      # ---------------------------------------------------------
-      # 14. Sync Capacitor
-      # ---------------------------------------------------------
-      - name: Sincronizar Capacitor
-        working-directory: project
-        shell: bash
-        run: |
-          set -e
-
-          npx cap sync android
-
-
-      # ---------------------------------------------------------
-      # 15. Verificar Android
-      # ---------------------------------------------------------
-      - name: Verificar projeto Android
-        working-directory: project/android
-        shell: bash
-        run: |
-          set -e
-
-          echo "Android:"
-          ls -la
-
-          echo ""
-          echo "App:"
-          ls -la app
-
-          echo ""
-          echo "C++:"
-          find app/src/main/cpp -maxdepth 2 -type f -print
-
-
-      # ---------------------------------------------------------
-      # 16. Configurar NDK
-      # ---------------------------------------------------------
-      - name: Configurar NDK para Gradle
-        working-directory: project/android
-        shell: bash
-        run: |
-          set -e
-
-          echo "ndk.dir=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" \
-            >> local.properties
-
-
-      # ---------------------------------------------------------
-      # 17. Criar Gradle Wrapper
-      # ---------------------------------------------------------
-      - name: Criar Gradle Wrapper
-        working-directory: project/android
-        shell: bash
-        run: |
-          set -e
-
-          gradle wrapper \
-            --gradle-version "${GRADLE_VERSION}"
-
-
-      # ---------------------------------------------------------
-      # 18. Build APK Debug
-      # ---------------------------------------------------------
-      - name: Compilar APK
-        working-directory: project/android
-        shell: bash
+      - name: Build APK
+        working-directory: workspace/android
         env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.NDK_VERSION }}
           ANDROID_NDK: ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.NDK_VERSION }}
         run: |
-          set -e
+          gradle wrapper --gradle-version 8.10
+          ./gradlew assembleDebug --no-daemon --stacktrace
 
-          chmod +x gradlew
-
-          ./gradlew \
-            assembleDebug \
-            --no-daemon \
-            --stacktrace
-
-
-      # ---------------------------------------------------------
-      # 19. Procurar APK
-      # ---------------------------------------------------------
-      - name: Localizar APK
-        id: apk
-        working-directory: project
-        shell: bash
-        run: |
-          set -e
-
-          APK=$(find android/app/build/outputs/apk \
-            -type f \
-            -name "*.apk" \
-            | head -n 1)
-
-          if [ -z "$APK" ]; then
-            echo "ERRO: APK não encontrado."
-            exit 1
-          fi
-
-          echo "APK:"
-          echo "$APK"
-
-          echo "path=$APK" >> "$GITHUB_OUTPUT"
-
-
-      # ---------------------------------------------------------
-      # 20. Publicar APK
-      # ---------------------------------------------------------
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: LocalPal-Android
-          path: project/${{ steps.apk.outputs.path }}
-          if-no-files-found: error
+          name: localpal-debug-apk
+          path: workspace/android/app/build/outputs/apk/debug/app-debug.apk
+
